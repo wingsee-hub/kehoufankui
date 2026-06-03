@@ -162,9 +162,9 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ---------- 端口监听：优先使用 Railway 注入的 PORT，否则 3000 ----------
+// ---------- 端口监听：固定使用 3000，Railway HTTP 路由器期望此端口 ----------
 // 关键修改：必须监听 '0.0.0.0' 才能让 Railway 正确转发外部请求
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 
 let server;
 try {
