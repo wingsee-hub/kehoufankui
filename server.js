@@ -3,22 +3,22 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
-// 中间件配置
+// 中间件
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// ---------- 用户次数存储（内存，生产环境建议替换为数据库） ----------
+// ---------- 用户次数存储（内存） ----------
 const userCredits = {};
 
 function ensureUser(userId) {
   if (!userCredits[userId]) {
-    userCredits[userId] = 10;  // 新用户赠送10次
-    console.log(`新用户 ${userId}，赠送10次`);
+    userCredits[userId] = 10;
+    console.log(`新用户 ${userId}，赠送 10 次`);
   }
   return userCredits[userId];
 }
 
-// ---------- 调用 DeepSeek API 的核心函数 ----------
+// ---------- 调用 DeepSeek API ----------
 async function callDeepSeek(messages, maxTokens = 800) {
   const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
     method: 'POST',
@@ -41,15 +41,14 @@ async function callDeepSeek(messages, maxTokens = 800) {
   return data.choices[0].message.content;
 }
 
-// ---------- 接口 1：查询剩余次数 ----------
+// ---------- 查询剩余次数 ----------
 app.get('/api/credits', (req, res) => {
   const { userId } = req.query;
   if (!userId) return res.status(400).json({ error: '缺少 userId' });
-  const credits = userCredits[userId] ?? 10;
-  res.json({ credits });
+  res.json({ credits: userCredits[userId] ?? 10 });
 });
 
-// ---------- 接口 2：管理员增加次数（需要 ADMIN_SECRET） ----------
+// ---------- 管理员增加次数 ----------
 app.post('/api/add-credits', (req, res) => {
   const { userId, amount, adminSecret } = req.body;
   if (adminSecret !== process.env.ADMIN_SECRET) {
@@ -64,7 +63,7 @@ app.post('/api/add-credits', (req, res) => {
   res.json({ success: true, newCredits: userCredits[userId] });
 });
 
-// ---------- 接口 3：生成课后反馈（消耗 1 次） ----------
+// ---------- 生成反馈 ----------
 app.post('/api/generate', async (req, res) => {
   const { userId, prompt, style, wordCount } = req.body;
   if (!userId || !prompt) return res.status(400).json({ error: '缺少参数' });
@@ -93,7 +92,7 @@ app.post('/api/generate', async (req, res) => {
   }
 });
 
-// ---------- 接口 4：作业批改分析（消耗 1 次） ----------
+// ---------- 作业批改 ----------
 app.post('/api/analyze', async (req, res) => {
   const { userId, ocrText, provideAnswer, answerText } = req.body;
   if (!userId || !ocrText) return res.status(400).json({ error: '缺少参数' });
@@ -107,7 +106,7 @@ app.post('/api/analyze', async (req, res) => {
   } else {
     prompt += ` 未提供参考答案，请自主判断题目对错并给出合理解析。`;
   }
-  prompt += ` 作业文本：${ocrText}。请以清晰段落输出批改结果（每题对错、解析、改进建议）。`;
+  prompt += ` 作业文本：${ocrText}。请以清晰段落输出批改结果。`;
   try {
     const messages = [
       { role: 'system', content: '你严格批改语文作业，指出对错并解释。输出纯文本。' },
@@ -122,7 +121,7 @@ app.post('/api/analyze', async (req, res) => {
   }
 });
 
-// ---------- 管理员页面（手动充值） ----------
+// ---------- 管理员页面 ----------
 app.get('/admin', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -157,13 +156,12 @@ app.get('/admin', (req, res) => {
   `);
 });
 
-// ---------- 健康检查端点（用于 Railway 探测） ----------
+// ---------- 健康检查 ----------
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ---------- 端口监听：固定使用 3000，Railway HTTP 路由器期望此端口 ----------
-// 关键修改：必须监听 '0.0.0.0' 才能让 Railway 正确转发外部请求
+// ---------- 硬编码端口为 3000，监听 0.0.0.0 ----------
 const PORT = 3000;
 
 let server;
@@ -178,7 +176,6 @@ try {
   process.exit(1);
 }
 
-// 优雅关闭（处理 SIGTERM 信号，Railway 停止容器时会发送）
 process.on('SIGTERM', () => {
   console.log('收到 SIGTERM 信号，正在关闭服务器...');
   if (server) {
