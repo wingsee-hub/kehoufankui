@@ -7,6 +7,11 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// ---------- 测试路由：访问根路径时返回简单文字 ----------
+app.get('/', (req, res) => {
+  res.send('Hello from backend. Server is running.');
+});
+
 // ---------- 用户次数存储（内存） ----------
 const userCredits = {};
 
