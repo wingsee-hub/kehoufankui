@@ -1,26 +1,37 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const app = express();
+const { Redis } = require('@upstash/redis');
 
-// 中间件
+const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// ---------- 测试路由：访问根路径时返回简单文字 ----------
-app.get('/', (req, res) => {
-  res.send('Hello from backend. Server is running.');
+// ---------- 初始化 Redis 客户端 ----------
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// ---------- 用户次数存储（内存） ----------
-const userCredits = {};
-
-function ensureUser(userId) {
-  if (!userCredits[userId]) {
-    userCredits[userId] = 10;
-    console.log(`新用户 ${userId}，赠送 10 次`);
+// ---------- 辅助函数：用户次数操作 ----------
+async function getUserCredits(userId) {
+  const credits = await redis.get(`credits:${userId}`);
+  if (credits === null) {
+    await redis.set(`credits:${userId}`, 10);
+    return 10;
   }
-  return userCredits[userId];
+  return parseInt(credits);
+}
+
+async function setUserCredits(userId, credits) {
+  await redis.set(`credits:${userId}`, credits);
+}
+
+async function decrementUserCredits(userId) {
+  const credits = await getUserCredits(userId);
+  if (credits <= 0) return false;
+  await redis.decr(`credits:${userId}`);
+  return true;
 }
 
 // ---------- 调用 DeepSeek API ----------
@@ -46,15 +57,16 @@ async function callDeepSeek(messages, maxTokens = 800) {
   return data.choices[0].message.content;
 }
 
-// ---------- 查询剩余次数 ----------
-app.get('/api/credits', (req, res) => {
+// ---------- 接口 1：查询剩余次数 ----------
+app.get('/api/credits', async (req, res) => {
   const { userId } = req.query;
   if (!userId) return res.status(400).json({ error: '缺少 userId' });
-  res.json({ credits: userCredits[userId] ?? 10 });
+  const credits = await getUserCredits(userId);
+  res.json({ credits });
 });
 
-// ---------- 管理员增加次数 ----------
-app.post('/api/add-credits', (req, res) => {
+// ---------- 接口 2：管理员增加次数 ----------
+app.post('/api/add-credits', async (req, res) => {
   const { userId, amount, adminSecret } = req.body;
   if (adminSecret !== process.env.ADMIN_SECRET) {
     return res.status(403).json({ error: '无效的管理员密钥' });
@@ -62,18 +74,19 @@ app.post('/api/add-credits', (req, res) => {
   if (!userId || typeof amount !== 'number') {
     return res.status(400).json({ error: '参数错误' });
   }
-  if (!userCredits[userId]) userCredits[userId] = 0;
-  userCredits[userId] += amount;
-  console.log(`用户 ${userId} 增加 ${amount} 次，当前剩余 ${userCredits[userId]}`);
-  res.json({ success: true, newCredits: userCredits[userId] });
+  const current = await getUserCredits(userId);
+  const newCredits = current + amount;
+  await setUserCredits(userId, newCredits);
+  console.log(`用户 ${userId} 增加 ${amount} 次，当前剩余 ${newCredits}`);
+  res.json({ success: true, newCredits });
 });
 
-// ---------- 生成反馈 ----------
+// ---------- 接口 3：生成反馈 ----------
 app.post('/api/generate', async (req, res) => {
   const { userId, prompt, style, wordCount } = req.body;
   if (!userId || !prompt) return res.status(400).json({ error: '缺少参数' });
-  ensureUser(userId);
-  if (userCredits[userId] <= 0) {
+  const credits = await getUserCredits(userId);
+  if (credits <= 0) {
     return res.status(402).json({ error: '次数不足，请联系管理员充值' });
   }
   try {
@@ -89,20 +102,21 @@ app.post('/api/generate', async (req, res) => {
     ];
     const maxTokens = Math.min(wordCount + 300, 2000);
     const content = await callDeepSeek(messages, maxTokens);
-    userCredits[userId]--;
-    res.json({ success: true, content, remaining: userCredits[userId] });
+    await decrementUserCredits(userId);
+    const remaining = await getUserCredits(userId);
+    res.json({ success: true, content, remaining });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: `生成失败: ${err.message}` });
   }
 });
 
-// ---------- 作业批改 ----------
+// ---------- 接口 4：作业批改 ----------
 app.post('/api/analyze', async (req, res) => {
   const { userId, ocrText, provideAnswer, answerText } = req.body;
   if (!userId || !ocrText) return res.status(400).json({ error: '缺少参数' });
-  ensureUser(userId);
-  if (userCredits[userId] <= 0) {
+  const credits = await getUserCredits(userId);
+  if (credits <= 0) {
     return res.status(402).json({ error: '次数不足，请联系管理员充值' });
   }
   let prompt = `你是一位语文作业批改专家。请根据以下作业内容进行逐题批改，分析每道题的对错，给出理由和建议。`;
@@ -118,8 +132,9 @@ app.post('/api/analyze', async (req, res) => {
       { role: 'user', content: prompt }
     ];
     const analysis = await callDeepSeek(messages, 1200);
-    userCredits[userId]--;
-    res.json({ success: true, analysis, remaining: userCredits[userId] });
+    await decrementUserCredits(userId);
+    const remaining = await getUserCredits(userId);
+    res.json({ success: true, analysis, remaining });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: `批改失败: ${err.message}` });
@@ -127,20 +142,18 @@ app.post('/api/analyze', async (req, res) => {
 });
 
 // ---------- 管理员页面 ----------
-app.get('/admin', (req, res) => {
+app.get('/admin', async (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html>
     <head><title>充值管理</title><meta charset="UTF-8"></head>
     <body>
       <h2>管理员充值</h2>
-      <p>当前用户次数存储（内存，重启后丢失）</p>
-      <pre>${JSON.stringify(userCredits, null, 2)}</pre>
-      <hr/>
-      <h3>增加次数</h3>
+      <p>请输入用户ID和增加次数</p>
       <input id="userId" placeholder="用户ID" />
       <input id="amount" placeholder="增加次数" type="number" />
       <button onclick="add()">增加</button>
+      <div id="result"></div>
       <script>
         async function add(){
           const userId = document.getElementById('userId').value;
@@ -152,8 +165,12 @@ app.get('/admin', (req, res) => {
             body:JSON.stringify({ userId, amount, adminSecret })
           });
           const data = await res.json();
-          alert(data.success ? '成功，剩余次数：'+data.newCredits : '失败：'+data.error);
-          location.reload();
+          if(data.success){
+            alert('成功，剩余次数：'+data.newCredits);
+            location.reload();
+          } else {
+            alert('失败：'+data.error);
+          }
         }
       </script>
     </body>
@@ -166,30 +183,15 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ---------- 关键修改：动态端口监听，使用 Railway 注入的 PORT 环境变量 ----------
-const PORT = process.env.PORT || 3000;
-
-let server;
-try {
-  server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[startup] 后端运行在 http://0.0.0.0:${PORT}`);
-    console.log(`[startup] NODE_ENV = ${process.env.NODE_ENV || 'development'}`);
-    console.log(`[startup] PID = ${process.pid}`);
-  });
-} catch (err) {
-  console.error('[FATAL] 服务器启动失败:', err);
-  process.exit(1);
-}
-
-// 优雅关闭
-process.on('SIGTERM', () => {
-  console.log('收到 SIGTERM 信号，正在关闭服务器...');
-  if (server) {
-    server.close(() => {
-      console.log('服务器已关闭');
-      process.exit(0);
-    });
-  } else {
-    process.exit(0);
-  }
+app.get('/', (req, res) => {
+  res.send('Backend is running with Redis storage.');
 });
+
+// ---------- 导出 app 供 Vercel 使用（无服务器模式） ----------
+module.exports = app;
+
+// 本地开发时启用监听（可选）
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log(`本地开发服务器运行在 http://localhost:${PORT}`));
+}
