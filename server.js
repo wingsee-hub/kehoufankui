@@ -5,6 +5,11 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// Health check endpoint — required for Railway to confirm the service is alive
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
+});
+
 const userCredits = {};
 
 function ensureUser(userId) {
@@ -74,8 +79,32 @@ app.post('/api/analyze', async (req, res) => {
 });
 
 app.get('/admin', (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><title>充值管理</title></head><body><h2>管理员充值</h2><pre>${JSON.stringify(userCredits, null, 2)}</pre><input id="userId" placeholder="用户ID" /><input id="amount" placeholder="增加次数" type="number" /><button onclick="add()">增加</button><script>async function add(){const userId=document.getElementById('userId').value;const amount=parseInt(document.getElementById('amount').value);const adminSecret=prompt('管理员密钥');const res=await fetch('/api/add-credits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId,amount,adminSecret})});const data=await res.json();alert(data.success?'成功，剩余次数：'+data.newCredits:'失败：'+data.error);location.reload();}</script></body></html>`);
+  res.send(`<!DOCTYPE html><html><head><title>充值管理</title></head><body><h2>管理员充值</h2><pre>${JSON.stringify(userCredits, null, 2)}</pre><input id=\"userId\" placeholder=\"用户ID\" /><input id=\"amount\" placeholder=\"增加次数\" type=\"number\" /><button onclick=\"add()\">增加</button><script>async function add(){const userId=document.getElementById('userId').value;const amount=parseInt(document.getElementById('amount').value);const adminSecret=prompt('管理员密钥');const res=await fetch('/api/add-credits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId,amount,adminSecret})});const data=await res.json();alert(data.success?'成功，剩余次数：'+data.newCredits:'失败：'+data.error);location.reload();}</script></body></html>`);
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`后端运行在 http://localhost:${PORT}`));
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[startup] 后端运行在 http://0.0.0.0:${PORT}`);
+  console.log(`[startup] NODE_ENV=${process.env.NODE_ENV || 'development'}`);
+  console.log(`[startup] PID=${process.pid}`);
+});
+
+// Graceful shutdown — Railway sends SIGTERM before stopping a container.
+// Finish in-flight requests, then exit cleanly so Railway marks the deploy as stopped.
+function shutdown(signal) {
+  console.log(`[shutdown] Received ${signal}. Closing HTTP server…`);
+  server.close(() => {
+    console.log('[shutdown] All connections closed. Exiting.');
+    process.exit(0);
+  });
+
+  // Force-exit if connections don't drain within 10 seconds
+  setTimeout(() => {
+    console.error('[shutdown] Forced exit after timeout.');
+    process.exit(1);
+  }, 10000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));
