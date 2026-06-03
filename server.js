@@ -166,8 +166,8 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ---------- 硬编码端口为 3000，监听 0.0.0.0 ----------
-const PORT = 3000;
+// ---------- 关键修改：动态端口监听，使用 Railway 注入的 PORT 环境变量 ----------
+const PORT = process.env.PORT || 3000;
 
 let server;
 try {
@@ -181,6 +181,7 @@ try {
   process.exit(1);
 }
 
+// 优雅关闭
 process.on('SIGTERM', () => {
   console.log('收到 SIGTERM 信号，正在关闭服务器...');
   if (server) {
