@@ -1,4 +1,27 @@
-require('dotenv').config();
+console.log('[startup] server.js is loading…');
+
+// Catch any uncaught exceptions and log them before the process exits
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException] Unhandled exception:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection] Unhandled promise rejection:', reason);
+  process.exit(1);
+});
+
+try {
+  const dotenvResult = require('dotenv').config();
+  if (dotenvResult.error) {
+    console.error('[startup] dotenv failed to load .env file:', dotenvResult.error.message);
+  } else {
+    console.log('[startup] dotenv loaded successfully');
+  }
+} catch (err) {
+  console.error('[startup] dotenv threw an exception:', err);
+}
+
 const express = require('express');
 const cors = require('cors');
 const app = express();
@@ -84,16 +107,31 @@ app.get('/admin', (req, res) => {
 
 const PORT = 3000;
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[startup] 后端运行在 http://0.0.0.0:${PORT}`);
-  console.log(`[startup] NODE_ENV=${process.env.NODE_ENV || 'development'}`);
-  console.log(`[startup] PID=${process.pid}`);
-});
+let server;
+try {
+  server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[startup] 后端运行在 http://0.0.0.0:${PORT}`);
+    console.log(`[startup] NODE_ENV=${process.env.NODE_ENV || 'development'}`);
+    console.log(`[startup] PID=${process.pid}`);
+  });
+
+  server.on('error', (err) => {
+    console.error('[startup] HTTP server error:', err);
+    process.exit(1);
+  });
+} catch (err) {
+  console.error('[startup] Failed to start HTTP server:', err);
+  process.exit(1);
+}
 
 // Graceful shutdown — Railway sends SIGTERM before stopping a container.
 // Finish in-flight requests, then exit cleanly so Railway marks the deploy as stopped.
 function shutdown(signal) {
   console.log(`[shutdown] Received ${signal}. Closing HTTP server…`);
+  if (!server) {
+    console.log('[shutdown] Server was never started. Exiting.');
+    process.exit(0);
+  }
   server.close(() => {
     console.log('[shutdown] All connections closed. Exiting.');
     process.exit(0);
