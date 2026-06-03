@@ -1,76 +1,77 @@
-console.log('[startup] server.js is loading…');
-
-// Catch any uncaught exceptions and log them before the process exits
-process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException] Unhandled exception:', err);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('[unhandledRejection] Unhandled promise rejection:', reason);
-  process.exit(1);
-});
-
-try {
-  const dotenvResult = require('dotenv').config();
-  if (dotenvResult.error) {
-    console.error('[startup] dotenv failed to load .env file:', dotenvResult.error.message);
-  } else {
-    console.log('[startup] dotenv loaded successfully');
-  }
-} catch (err) {
-  console.error('[startup] dotenv threw an exception:', err);
-}
-
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const app = express();
+
+// 中间件配置
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Health check endpoint — required for Railway to confirm the service is alive
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', uptime: process.uptime() });
-});
-
+// ---------- 用户次数存储（内存，生产环境建议替换为数据库） ----------
 const userCredits = {};
 
 function ensureUser(userId) {
-  if (!userCredits[userId]) userCredits[userId] = 10;
+  if (!userCredits[userId]) {
+    userCredits[userId] = 10;  // 新用户赠送10次
+    console.log(`新用户 ${userId}，赠送10次`);
+  }
   return userCredits[userId];
 }
 
+// ---------- 调用 DeepSeek API 的核心函数 ----------
 async function callDeepSeek(messages, maxTokens = 800) {
   const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}` },
-    body: JSON.stringify({ model: 'deepseek-chat', messages, temperature: 0.6, max_tokens: maxTokens })
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'deepseek-chat',
+      messages: messages,
+      temperature: 0.6,
+      max_tokens: maxTokens
+    })
   });
-  if (!response.ok) throw new Error(`DeepSeek API错误: ${response.status}`);
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`DeepSeek API 错误 ${response.status}: ${errText}`);
+  }
   const data = await response.json();
   return data.choices[0].message.content;
 }
 
+// ---------- 接口 1：查询剩余次数 ----------
 app.get('/api/credits', (req, res) => {
   const { userId } = req.query;
-  if (!userId) return res.status(400).json({ error: '缺少userId' });
-  res.json({ credits: userCredits[userId] ?? 10 });
+  if (!userId) return res.status(400).json({ error: '缺少 userId' });
+  const credits = userCredits[userId] ?? 10;
+  res.json({ credits });
 });
 
+// ---------- 接口 2：管理员增加次数（需要 ADMIN_SECRET） ----------
 app.post('/api/add-credits', (req, res) => {
   const { userId, amount, adminSecret } = req.body;
-  if (adminSecret !== process.env.ADMIN_SECRET) return res.status(403).json({ error: '无效的管理员密钥' });
-  if (!userId || typeof amount !== 'number') return res.status(400).json({ error: '参数错误' });
+  if (adminSecret !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: '无效的管理员密钥' });
+  }
+  if (!userId || typeof amount !== 'number') {
+    return res.status(400).json({ error: '参数错误' });
+  }
   if (!userCredits[userId]) userCredits[userId] = 0;
   userCredits[userId] += amount;
+  console.log(`用户 ${userId} 增加 ${amount} 次，当前剩余 ${userCredits[userId]}`);
   res.json({ success: true, newCredits: userCredits[userId] });
 });
 
+// ---------- 接口 3：生成课后反馈（消耗 1 次） ----------
 app.post('/api/generate', async (req, res) => {
   const { userId, prompt, style, wordCount } = req.body;
   if (!userId || !prompt) return res.status(400).json({ error: '缺少参数' });
   ensureUser(userId);
-  if (userCredits[userId] <= 0) return res.status(402).json({ error: '次数不足' });
+  if (userCredits[userId] <= 0) {
+    return res.status(402).json({ error: '次数不足，请联系管理员充值' });
+  }
   try {
     let systemContent = '你是语文教育专家，请撰写家长反馈。';
     if (style === 'formal') systemContent += ' 风格正式专业。';
@@ -78,71 +79,114 @@ app.post('/api/generate', async (req, res) => {
     else if (style === 'brief') systemContent += ' 风格简洁有力。';
     else if (style === 'literary') systemContent += ' 风格文艺得体。';
     systemContent += ' 禁止使用Markdown格式，纯文本输出。';
-    const content = await callDeepSeek([{ role: 'system', content: systemContent }, { role: 'user', content: prompt }], Math.min(wordCount + 300, 2000));
+    const messages = [
+      { role: 'system', content: systemContent },
+      { role: 'user', content: prompt }
+    ];
+    const maxTokens = Math.min(wordCount + 300, 2000);
+    const content = await callDeepSeek(messages, maxTokens);
     userCredits[userId]--;
     res.json({ success: true, content, remaining: userCredits[userId] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: `生成失败: ${err.message}` });
   }
 });
 
+// ---------- 接口 4：作业批改分析（消耗 1 次） ----------
 app.post('/api/analyze', async (req, res) => {
   const { userId, ocrText, provideAnswer, answerText } = req.body;
   if (!userId || !ocrText) return res.status(400).json({ error: '缺少参数' });
   ensureUser(userId);
-  if (userCredits[userId] <= 0) return res.status(402).json({ error: '次数不足' });
-  let prompt = `你是一位语文作业批改专家。请根据以下作业内容进行逐题批改，分析每道题的对错，给出理由和建议。${provideAnswer && answerText ? `参考答案如下：${answerText}` : '未提供参考答案，请自主判断题目对错并给出合理解析。'}作业文本：${ocrText}。请以清晰段落输出批改结果。`;
+  if (userCredits[userId] <= 0) {
+    return res.status(402).json({ error: '次数不足，请联系管理员充值' });
+  }
+  let prompt = `你是一位语文作业批改专家。请根据以下作业内容进行逐题批改，分析每道题的对错，给出理由和建议。`;
+  if (provideAnswer && answerText) {
+    prompt += ` 参考答案如下：${answerText}`;
+  } else {
+    prompt += ` 未提供参考答案，请自主判断题目对错并给出合理解析。`;
+  }
+  prompt += ` 作业文本：${ocrText}。请以清晰段落输出批改结果（每题对错、解析、改进建议）。`;
   try {
-    const analysis = await callDeepSeek([{ role: 'system', content: '你严格批改语文作业，指出对错并解释。输出纯文本。' }, { role: 'user', content: prompt }], 1200);
+    const messages = [
+      { role: 'system', content: '你严格批改语文作业，指出对错并解释。输出纯文本。' },
+      { role: 'user', content: prompt }
+    ];
+    const analysis = await callDeepSeek(messages, 1200);
     userCredits[userId]--;
     res.json({ success: true, analysis, remaining: userCredits[userId] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: `批改失败: ${err.message}` });
   }
 });
 
+// ---------- 管理员页面（手动充值） ----------
 app.get('/admin', (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><title>充值管理</title></head><body><h2>管理员充值</h2><pre>${JSON.stringify(userCredits, null, 2)}</pre><input id=\"userId\" placeholder=\"用户ID\" /><input id=\"amount\" placeholder=\"增加次数\" type=\"number\" /><button onclick=\"add()\">增加</button><script>async function add(){const userId=document.getElementById('userId').value;const amount=parseInt(document.getElementById('amount').value);const adminSecret=prompt('管理员密钥');const res=await fetch('/api/add-credits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId,amount,adminSecret})});const data=await res.json();alert(data.success?'成功，剩余次数：'+data.newCredits:'失败：'+data.error);location.reload();}</script></body></html>`);
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>充值管理</title><meta charset="UTF-8"></head>
+    <body>
+      <h2>管理员充值</h2>
+      <p>当前用户次数存储（内存，重启后丢失）</p>
+      <pre>${JSON.stringify(userCredits, null, 2)}</pre>
+      <hr/>
+      <h3>增加次数</h3>
+      <input id="userId" placeholder="用户ID" />
+      <input id="amount" placeholder="增加次数" type="number" />
+      <button onclick="add()">增加</button>
+      <script>
+        async function add(){
+          const userId = document.getElementById('userId').value;
+          const amount = parseInt(document.getElementById('amount').value);
+          const adminSecret = prompt('管理员密钥');
+          const res = await fetch('/api/add-credits', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({ userId, amount, adminSecret })
+          });
+          const data = await res.json();
+          alert(data.success ? '成功，剩余次数：'+data.newCredits : '失败：'+data.error);
+          location.reload();
+        }
+      </script>
+    </body>
+    </html>
+  `);
 });
 
-const PORT = 3000;
+// ---------- 健康检查端点（用于 Railway 探测） ----------
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// ---------- 端口监听：优先使用 Railway 注入的 PORT，否则 3000 ----------
+// 关键修改：必须监听 '0.0.0.0' 才能让 Railway 正确转发外部请求
+const PORT = process.env.PORT || 3000;
 
 let server;
 try {
   server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[startup] 后端运行在 http://0.0.0.0:${PORT}`);
-    console.log(`[startup] NODE_ENV=${process.env.NODE_ENV || 'development'}`);
-    console.log(`[startup] PID=${process.pid}`);
-  });
-
-  server.on('error', (err) => {
-    console.error('[startup] HTTP server error:', err);
-    process.exit(1);
+    console.log(`[startup] NODE_ENV = ${process.env.NODE_ENV || 'development'}`);
+    console.log(`[startup] PID = ${process.pid}`);
   });
 } catch (err) {
-  console.error('[startup] Failed to start HTTP server:', err);
+  console.error('[FATAL] 服务器启动失败:', err);
   process.exit(1);
 }
 
-// Graceful shutdown — Railway sends SIGTERM before stopping a container.
-// Finish in-flight requests, then exit cleanly so Railway marks the deploy as stopped.
-function shutdown(signal) {
-  console.log(`[shutdown] Received ${signal}. Closing HTTP server…`);
-  if (!server) {
-    console.log('[shutdown] Server was never started. Exiting.');
+// 优雅关闭（处理 SIGTERM 信号，Railway 停止容器时会发送）
+process.on('SIGTERM', () => {
+  console.log('收到 SIGTERM 信号，正在关闭服务器...');
+  if (server) {
+    server.close(() => {
+      console.log('服务器已关闭');
+      process.exit(0);
+    });
+  } else {
     process.exit(0);
   }
-  server.close(() => {
-    console.log('[shutdown] All connections closed. Exiting.');
-    process.exit(0);
-  });
-
-  // Force-exit if connections don't drain within 10 seconds
-  setTimeout(() => {
-    console.error('[shutdown] Forced exit after timeout.');
-    process.exit(1);
-  }, 10000).unref();
-}
-
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT',  () => shutdown('SIGINT'));
+});
