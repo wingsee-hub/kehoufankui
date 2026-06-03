@@ -77,5 +77,5 @@ app.get('/admin', (req, res) => {
   res.send(`<!DOCTYPE html><html><head><title>充值管理</title></head><body><h2>管理员充值</h2><pre>${JSON.stringify(userCredits, null, 2)}</pre><input id="userId" placeholder="用户ID" /><input id="amount" placeholder="增加次数" type="number" /><button onclick="add()">增加</button><script>async function add(){const userId=document.getElementById('userId').value;const amount=parseInt(document.getElementById('amount').value);const adminSecret=prompt('管理员密钥');const res=await fetch('/api/add-credits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId,amount,adminSecret})});const data=await res.json();alert(data.success?'成功，剩余次数：'+data.newCredits:'失败：'+data.error);location.reload();}</script></body></html>`);
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 app.listen(PORT, () => console.log(`后端运行在 http://localhost:${PORT}`));
